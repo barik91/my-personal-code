@@ -1,0 +1,671 @@
+name: $(clusterName)_$(Date:yyyyMMdd)
+
+trigger:
+- none
+
+pool:
+  vmImage: 'windows-2019'
+
+variables:
+- template: ../landingzone-variables.yaml
+- group: ORACLE-AWS
+- group: ORACLE-AWS-AGENT-POOL
+- name: PIPELINE-TYPE
+  value: MIGRATION
+- name: AWS-SERVICE-CONNECTION-NAME
+  # value: AWS-${{ parameters.appName }}-${{ parameters.typeOfEnv }}-$(PIPELINE-TYPE)
+  value: AWS-SRBP-DE-MIGRATION
+- name: TERRAFORM-AWS-SERVICE-CONNECTION-NAME
+  # value: AWS-TERRAFORM-${{ parameters.appName }}-${{ parameters.typeOfEnv }}-$(PIPELINE-TYPE)
+  value: AWS-TERRAFORM-SRBP-DE-MIGRATION
+- name: AGENT-POOL-NAME
+  value: '$(${{ parameters.clusterName }})'
+- name: setupBucket
+  value: '$(OracleSetupBucket)'
+
+parameters:
+
+- name: appName
+  displayName: Enter Application Name (Ex- SFLR)
+  type: string
+
+- name: typeOfEnv
+  displayName: Select type of Environment (*) [DE = dev, QA=qa, LD=load, ST=stage, BC = bcp, PD = prod] [The AWS parameter store values needed to be setup with respect to the environment eg:/SqlCluster/dev/adoPat for DE | /SqlCluster/prod/Url for PD]
+  default: DE 
+  type: string
+  values:
+    - DE
+    - QA
+    - LD
+    - ST
+    - BC
+    - PD
+
+- name: osType
+  displayName: Select the Operating System
+  type: string
+  values:
+    - RHEL 7
+    - RHEL 8
+
+- name: oracleVersion
+  displayName: Select Oracle Version
+  type: string
+  values:
+    - 12c
+    # - 19c
+
+- name: numberOfVms
+  displayName: Enter Number of VM's
+  default: 1
+  type: number
+
+- name: region1
+  displayName: Region
+  type: string
+  values:
+    - us-east-1
+    - us-east-2
+    - us-west-1
+    - us-west-2
+
+- name: vpcId1
+  displayName: Enter VPC ID (Ex- vpc-0fb4f35265ed3)
+  type: string
+
+- name: subnetIds1
+  displayName: Enter Subnet ID (Ex- subnet-0ab12d9a08739)
+  type: string
+
+- name: instance_type
+  displayName: Enter Instance Type
+  type: string
+  values:
+    - r5.large (2vCPU)
+    - r5.xlarge (4vCPU)
+    - r5.2xlarge (8vCPU)
+    - r5.4xlarge (16vCPU)
+    - r5.8xlarge (32vCPU)
+    - r5.12xlarge (48vCPU)
+    - r5.16xlarge (64vCPU)
+    - r5.24xlarge (96vCPU)
+    - r5b.large (2vCPU)
+    - r5b.xlarge (4vCPU)
+    - r5b.2xlarge (8vCPU)
+    - r5b.4xlarge (16vCPU)
+    - r5b.8xlarge (32vCPU)
+    - r5b.12xlarge (48vCPU)
+    - r5b.16xlarge (64vCPU)
+    - r5b.24xlarge (96vCPU)
+    - m5.large (2vCPU)
+    - m5.xlarge (4vCPU)
+    - m5.2xlarge (8vCPU)
+    - m5.4xlarge (16vCPU)
+    - m5.8xlarge (32vCPU)
+    - m5.8xlarge (48vCPU)
+    - m5.16xlarge (64vCPU)
+    - m5.24xlarge (96vCPU)
+    - m5.metal (96vCPU)
+    - t3.large (2vCPU)
+    - t3.xlarge (4vCPU)
+
+- name: Edrive
+  displayName: Enter Size (GB) for volume 1
+  type: number
+  default: 200
+
+- name: Fdrive
+  displayName: Enter Size (GB) for volume 2
+  type: number
+  default: 200
+
+- name: Gdrive
+  displayName: Enter Size (GB) for volume 3
+  type: number
+  default: 200
+
+- name: clusterName
+  displayName: Agent Pool Name
+  type: string
+
+- name: fssOwner
+  displayName: Select FSS Owner (*)
+  default: ITS
+  type: string
+  values:
+    - ITS
+    - AUD
+    - ADV
+    - ENA
+    - TAX
+    - CON
+
+- name: dbUser
+  displayName: Enter Oracle Software Owner [Ex:- orasfr]
+  type: string
+
+- name: bucketName
+  displayName: Enter S3 Bucket Name for Terraform Backend
+  default: Nil
+  type: string
+
+# - name: setupBucket
+#   displayName: Enter Bucket Name With Oracle Software Setup Files
+#   type: string
+    
+jobs:
+- job: init
+  displayName: Collect Server Names
+  variables:
+    instance_type: ${{ parameters.instance_type }}
+    typeOfEnv: ${{ parameters.typeOfEnv }}
+    subnetIds1: "${{ parameters.subnetIds1 }}"
+    os_name: ${{ parameters.osType }}
+
+  steps: 
+  - powershell: |
+      #Convert Application Name to Lowercase
+      $appName = "${{ parameters.appName }}".ToLower()
+      $agentPool = "${{ parameters.clusterName }}".ToLower()
+      $appName = "${{ parameters.appName }}".ToLower()
+      echo "##vso[task.setvariable variable=appName;isOutput=true]$appName"
+      $envName = "${{ parameters.typeOfEnv }}".ToLower()
+      echo "##vso[task.setvariable variable=envName;isOutput=true]$envName"
+
+
+      # AMI Name from OS type
+      $os_name = "$(os_name)"
+      $ami_name = switch ( $os_name )
+      {
+          'SUSE 15-sp2' { 'suse-sles-15-sp2-v20201211-hvm-ssd-x86_64' }
+          'SUSE 12-sp5' { 'suse-sles-12-sp5-*' }
+          'RHEL 8' { 'RHEL-8.4.0_HVM-20210504-x86_64-2-Hourly2-GP2' }
+          'RHEL 7' { 'RHEL-7.9_HVM-20220512-x86_64-1-Hourly2-GP2' }
+      }
+
+      echo "##vso[task.setvariable variable=ami_name;isOutput=true]$ami_name"
+      $instance_type = ("$(instance_type)" -split " ")[0]
+      echo "##vso[task.setvariable variable=instance_type;isOutput=true]$instance_type"
+
+      Write-Host "----Input Parameters for Resource Creation -----"
+
+      Write-Host "
+      Type of Environment               : ${{ parameters.typeOfEnv }}
+      App Name                          : ${appName}
+      Location                          : ${{ parameters.region1 }}
+      FSS Owner                         : ${{ parameters.fssOwner }}
+      System name for Naming API        : ${{ parameters.clusterName }}
+      Agent Pool Name                   : ${{ parameters.clusterName }}
+      ADO Organization                  : $(System.CollectionUri)
+      Operating System                  : ${{ parameters.osType }}
+      AWS Service Connection Name       : $(AWS-SERVICE-CONNECTION-NAME)
+      Terraform Service Connection Name : $(TERRAFORM-AWS-SERVICE-CONNECTION-NAME)
+      AMI Name                          : $ami_name
+      VPC ID                            : ${{ parameters.vpcId1 }}
+      Subnet Ids Location1              : ${{ parameters.subnetIds1 }}
+      Instance type                     : ${{ parameters.instance_type }}
+      S3 bucketName                     : ${{ parameters.bucketName }}
+      Volume1                           : ${{ parameters.Edrive }}GB
+      Volume2                           : ${{ parameters.Fdrive }}GB
+      Volume3                           : ${{ parameters.Gdrive }}GB
+      ADO PAT                           : $(PAT)
+      Client Secret                     : $(CLIENT-SECRET)
+      Country Code                      : $(country-code)
+      Naming Client ID                  : $(namingClientId)
+      Service User                      : $(SA-ADMIN-USER)
+      Service Password                  : $(SA-ADMIN-PASS)
+      Oauth Api URL                     : $(url-oauth-api)
+      Naming Api URL V2                 : $(urlNamingApiV2) "
+
+    name: displayParameters
+    displayName: Display Parameters
+
+  - task: PowerShell@2
+    name: RequestServerName
+    inputs:
+      targetType: 'filePath'
+      filePath: $(System.DefaultWorkingDirectory)/LandingZoneAzure/namingserver.ps1
+      arguments: >
+        -urlOauthApi '$(url-oauth-api)'
+        -oauthResId '$(namingOauthResId)'
+        -clientId '$(namingClientId)'
+        -clientSecret '$(CLIENT-SECRET)'
+        -countryCode '$(country-code)'
+        -cloudProvider 'AWS'
+        -fssOwner '${{ parameters.fssOwner }}'
+        -typeOfEnv '${{ parameters.typeOfEnv }}'
+        -systemName '${{ parameters.clusterName }}-${{ parameters.region1 }}'
+        -appServers '${{ parameters.numberOfVms }}'
+        -urlNamingApi '$(urlNamingApiV2)'
+        -serverType 'DB'
+    displayName: 'Get location 1 VM Names'
+
+  - task: PowerShell@2
+    name: setEnvGroupVariable
+    displayName: Set Environment Group Variable
+    inputs:
+      targetType: 'filePath'
+      filePath: $(System.DefaultWorkingDirectory)/LandingZoneAWS/azure-api-powershell/setEnvGroup.ps1
+      arguments: >
+        -PAT '$(PAT)'
+        -Organization '$(System.CollectionUri)'
+        -Project '$(System.TeamProject)'
+        -VariableGroup ORACLE-AWS-AGENT-POOL
+        -AgentPool '${{ parameters.clusterName }}'
+
+  - powershell: |
+      $vms1 = Get-Content -Path VmNames
+
+      [string[]] $location1Vms = $vms1
+      [string]$vm_name_location1 = $vms1
+      $vm_name_location1 = '"' + $vm_name_location1 + '"'
+       echo "##vso[task.setvariable variable=vm_name_location1;isOutput=true]$vm_name_location1"
+      for($i = 0; $i -lt $location1Vms.length; $i++){
+        $temp = $location1Vms[$i] + " : " ;
+        $node = $i + 1 ;
+        $json = "$json" + "$temp" + "{ Node : $node  }, "
+      }
+
+      $location1Json = "{ " + $json.trim().trim(",") + " }" 
+
+      # Export Json string Location1
+      echo "Location 1 Json : $location1Json"
+      echo "##vso[task.setvariable variable=location1Json;isOutput=true]$location1Json"
+
+      echo $vms1
+      echo "##vso[task.setvariable variable=vms1;isOutput=true]$vms1"
+      echo "##vso[task.setvariable variable=vms1]$vms1"
+
+      [string[]]$vms1 = $vms1.split()
+      foreach ($item in $vms1){
+        $item='"'+ $item +'"' ;
+        $list1 = $list1 + $item + ' '
+      }
+
+      $list1 = $list1.replace(" ",",") ;
+      
+      $list1 = '[' + $list1.Substring(0, $list1.length-1) + ']';
+
+      # Write-Host "VM List 1 : " $list1 
+      echo "##vso[task.setvariable variable=list1;isOutput=true]$list1"
+      
+      $subnets = ''
+      [string[]]$subnets = "$(subnetIds1)"
+      [string[]]$subnetIds1 = $subnets.split(',')
+      foreach ($item in $subnetIds1){
+        $item='"'+ $item +'"' ;
+        $subnetlist1 = $subnetlist1 + $item + ' '
+      }
+
+      $subnetlist1 = $subnetlist1.replace(" ",",") ;
+      $subnetlist1 = '[' + $subnetlist1.Substring(0, $subnetlist1.length-1) + ']';
+      echo "##vso[task.setvariable variable=subnetlist1;isOutput=true]$subnetlist1"
+
+    name: SetVmNames1
+    displayName: 'Display VM Names'
+
+- job: createResources
+  displayName: Create Virtual Machine (EC2 Instance)
+  dependsOn:
+    - init
+  pool:
+    vmImage: 'ubuntu-latest'
+  variables:
+    list1: $[ dependencies.init.outputs['SetVmNames1.list1'] ]
+    vpcId: "${{ parameters.vpcId1 }}"
+    instance_type: $[ dependencies.init.outputs['displayParameters.instance_type'] ] 
+    terraformDir: LandingZoneAWS/terraform/Oracle-box/
+    subnetlist1: $[ dependencies.init.outputs['SetVmNames1.subnetlist1'] ]
+    subnet_ids1: "${{ parameters.subnetIds1 }}"
+    clusterName: "${{ parameters.clusterName }}"
+    region1: ${{ parameters.region1 }}
+    vm_name_location1: $[ dependencies.init.outputs['SetVmNames1.vm_name_location1'] ]
+    ami_name: $[ dependencies.init.outputs['displayParameters.ami_name'] ]
+    Edrive : "${{ parameters.Edrive }}"
+    Fdrive : "${{ parameters.Fdrive }}"
+    Gdrive : "${{ parameters.Gdrive }}"
+    appName: "${{ parameters.appName }}"
+    envName: $[ dependencies.init.outputs['displayParameters.ami_name'] ]
+  steps:
+  - powershell: |
+        Add-Content $(terraformDir)/terraform.tfvars "`n"
+        Add-Content $(terraformDir)/terraform.tfvars 'appName = "$(appName)"'
+        Add-Content $(terraformDir)/terraform.tfvars 'adoCommitID = "$(Build.SourceVersion)"'
+        Add-Content $(terraformDir)/terraform.tfvars 'agentPoolName = "$(clusterName)"'
+        Add-Content $(terraformDir)/terraform.tfvars 'region1 = "$(region1)"'
+        Add-Content $(terraformDir)/terraform.tfvars 'vm_names_location1 = $(list1)'
+        Add-Content $(terraformDir)/terraform.tfvars 'ami_name = "$(ami_name)"'
+        Add-Content $(terraformDir)/terraform.tfvars 'instance_type = "$(instance_type)"'
+        Add-Content $(terraformDir)/terraform.tfvars 'vpc_id = "$(vpcId)"'
+        Add-Content $(terraformDir)/terraform.tfvars 'subnet_ids1 = $(subnetlist1)'
+        Add-Content $(terraformDir)/terraform.tfvars 'hDriveSize = $(Edrive)'
+        Add-Content $(terraformDir)/terraform.tfvars 'fDriveSize = $(Fdrive)'
+        Add-Content $(terraformDir)/terraform.tfvars 'gDriveSize = $(Gdrive)'
+        Add-Content $(terraformDir)/terraform.tfvars 'adoPat = "$(PAT)"'
+        Add-Content $(terraformDir)/terraform.tfvars 'Url = "$(System.CollectionUri)"'
+        
+        echo 'Reading Terraform Variables....'
+        Get-Content -Path $(terraformDir)/terraform.tfvars
+
+    name: setvariable
+    enabled: true
+    displayName: Setting Variables 
+
+  # - task: AWSShellScript@1
+  #   enabled: true
+  #   name: createS3Bucket
+  #   displayName: Create S3 Bucket
+  #   condition: and(succeeded(), eq('${{ parameters.bucketName }}', 'Nil'))
+  #   inputs:
+  #     awsCredentials: '$(AWS-SERVICE-CONNECTION-NAME)'
+  #     regionName: $(region1)
+  #     scriptType: 'inline'
+  #     inlineScript: |
+  #       env=$(echo "${{ parameters.typeOfEnv }}" | tr '[:upper:]' '[:lower:]')
+  #       agentPool=$(echo "$(clusterName)" | tr '[:upper:]' '[:lower:]')
+  #       bucketName="dcm-oracle-server-${env}-${agentPool}"
+  #       region="$(region1)"
+  #       echo "Bucket Name   : ${bucketName}"
+  #       echo "Bucket Region : ${{ parameters.region1 }}"
+  #       aws s3api create-bucket --bucket ${bucketName} --region $(region1)
+  #       aws s3api create-bucket --bucket ${bucketName} --create-bucket-configuration LocationConstraint=$(region1)
+  #       sleep 120
+  #       echo "##vso[task.setvariable variable=bucketName]$bucketName"
+
+  - task: TerraformInstaller@0
+    displayName: Terraform Install
+    enabled: true
+    inputs:
+      terraformVersion: '0.15.3'
+
+  - task: TerraformTaskV1@0
+    displayName: Terraform Initilization
+    condition: and(succeeded(), ne('${{ parameters.bucketName }}', 'Nil'))
+    enabled: true
+    inputs:
+      provider: 'aws'
+      command: 'init'
+      workingDirectory: '$(terraformDir)'
+      backendServiceAWS: '$(TERRAFORM-AWS-SERVICE-CONNECTION-NAME)'
+      backendAWSBucketName: '${{ parameters.bucketName }}'
+      backendAWSKey: 'tf/$(clusterName)/terraform.tfstate'
+
+  - task: TerraformTaskV1@0
+    displayName: Terraform Initilization
+    condition: and(succeeded(), eq('${{ parameters.bucketName }}', 'Nil'))
+    enabled: true
+    inputs:
+      provider: 'aws'
+      command: 'init'
+      workingDirectory: '$(terraformDir)'
+      backendServiceAWS: '$(TERRAFORM-AWS-SERVICE-CONNECTION-NAME)'
+      # backendAWSBucketName: 'dcm-oracle-server-${{ parameters.typeOfEnv }}-$(clusterName)'
+      backendAWSBucketName: '$(bucketName)'
+      backendAWSKey: 'tf/$(clusterName)/terraform.tfstate'
+  
+  - task: TerraformTaskV1@0
+    displayName: Terraform Plan
+    enabled: true
+    inputs:
+      provider: 'aws'
+      command: 'plan'
+      workingDirectory: '$(terraformDir)'
+      environmentServiceNameAWS: '$(TERRAFORM-AWS-SERVICE-CONNECTION-NAME)'
+
+  - task: TerraformTaskV1@0
+    displayName: Terraform Apply
+    enabled: true
+    inputs:
+      provider: 'aws'
+      command: 'apply'
+      workingDirectory: '$(terraformDir)'
+      commandOptions: --auto-approve -lock=false
+      environmentServiceNameAWS: '$(TERRAFORM-AWS-SERVICE-CONNECTION-NAME)'
+
+# - job: CreateS3bucket
+#   displayName: Creating S3 Bucket to Keep Database Resources
+#   dependsOn:
+#     - init 
+#   pool:
+#     vmImage: 'ubuntu-latest'
+#   variables:
+#     appName: $[ dependencies.init.outputs['displayParameters.appName'] ]
+#     envName: $[ dependencies.init.outputs['displayParameters.envName'] ]
+#     region: ${{ parameters.region1 }}
+#   steps:
+#   - task: AWSShellScript@1
+#     enabled: true
+#     name: createS3Bucket
+#     displayName: Create S3 Bucket
+#     inputs:
+#       awsCredentials: '$(AWS-SERVICE-CONNECTION-NAME)'
+#       regionName: $(region)
+#       scriptType: 'inline'
+#       inlineScript: |
+#         bucketName="oracle-ec2-migration-$(envName)-$(appName)"
+#         region="$(region)"
+#         echo "Bucket Name   : ${bucketName}"
+#         echo "Bucket Region : ${{ parameters.region1 }}"
+#         aws s3api create-bucket --bucket ${bucketName} --region $(region)
+#         aws s3api create-bucket --bucket ${bucketName} --create-bucket-configuration LocationConstraint=$(region)
+#         echo "##vso[task.setvariable variable=bucketName;isOutput=true]$bucketName"
+
+# - job: domainJoin
+#   displayName: Waiting for Domain join to Finish.
+#   dependsOn:
+#     - init 
+#     - createResources
+#   steps:
+#   - powershell: |
+#         Write-Host "Waiting for Domain join to Finish..."
+#         Start-Sleep -s 1800
+#     enabled: true
+#     displayName: 'Domain Join'
+
+# - job: RestartServers
+#   displayName: Restart Virtual Machine (EC2 Instance)
+#   dependsOn:
+#     - init
+#     - domainJoin
+#   variables: 
+#     vms1: $[ dependencies.init.outputs['SetVmNames1.vms1'] ]
+#   steps:
+#   - task: AWSShellScript@1
+#     displayName: Reboot Servers
+#     enabled: true
+#     inputs:
+#       awsCredentials: '$(AWS-SERVICE-CONNECTION-NAME)'
+#       regionName: "${{ parameters.region1 }}"
+#       scriptType: "inline"
+#       inlineScript: |
+#         vm="$(vms1)"
+#         vmnames=($vm)
+#         len=${#vmnames[@]}
+#         for (( i=0; i<${len}; i++ ));
+#        do	
+#             instanceId[$i]=$(aws ec2 describe-instances --filters Name=tag:Name,Values=${vmnames[$i]} Name=instance-state-name,Values=running  --query Reservations[*].Instances[*].[InstanceId] --output text)
+#             privateIP[$i]=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=${vmnames[$i]}"  --query Reservations[*].Instances[*].PrivateIpAddress --output text)
+#         done
+#         instanceIds=${instanceId[*]}
+#         privateIPs=${privateIP[*]}
+#         echo "Instance ID's : ${instanceIds}"
+#         echo "Private IP's  : ${privateIPs}"
+#         aws ec2 reboot-instances --instance-ids ${instanceIds}
+#         sleep 300
+
+# - job: createSwap
+#   displayName: Create SWAP and File System Partition
+#   dependsOn: 
+#     - init
+#     - domainJoin
+#     - RestartServers
+#   variables:
+#     vm_name_location1: $[ dependencies.init.outputs['SetVmNames1.vm_name_location1'] ]
+#     destinationlocation: /tmp/
+#   pool:
+#     name: ${{ parameters.clusterName }}
+#   strategy:
+#     matrix: $[ dependencies.init.outputs['SetVmNames1.location1Json'] ]
+#   steps:
+  
+#   - task: Bash@3
+#     displayName: Execute SWAP and File System Creation Scripts
+#     enabled: true
+#     inputs:
+#       filePath: $(System.DefaultWorkingDirectory)/LandingZoneAWS/oracle-scripts/swapSpace.sh
+#       arguments: ${{ parameters.appName }}
+
+# - job: restartnodes
+#   displayName: Waiting For Restat To Finish.
+#   dependsOn:
+#     - init 
+#     - createResources
+#     - RestartServers
+#     - CreateSwap
+#   steps:
+#   - powershell: |
+#         Write-Host "Waiting for restart to Finish..."
+#         Start-Sleep -s 300
+#     enabled: true
+#     displayName: 'Waiting For Restart'
+
+# - job: InstallOracle
+#   displayName: Oracle Installation
+#   dependsOn: 
+#     - init
+#     - domainJoin
+#     - RestartServers
+#     - CreateSwap
+#     - restartnodes
+#   variables:
+#     vm_name_location1: $[ dependencies.init.outputs['SetVmNames1.vm_name_location1'] ]
+#     destinationlocation: /tmp/
+#   pool:
+#     name: ${{ parameters.clusterName }}
+#   strategy:
+#     matrix: $[ dependencies.init.outputs['SetVmNames1.location1Json'] ]
+#   steps:
+
+#   - task: S3Download@1
+#     displayName: Download Oracle Software From S3
+#     enabled: true
+#     inputs:
+#       # awsCredentials: '$(AWS-SERVICE-CONNECTION-NAME)'
+#       awsCredentials: '$(OracleSetupServiceAccount)'
+#       # regionName: "${{ parameters.region1 }}"
+#       regionName: '$(OracleSetupServiceAccountRegion)'
+#       # bucketName: "${{ parameters.setupBucket }}"
+#       bucketName: '$(setupBucket)'
+#       globExpressions: "**"
+#       targetFolder: "$(destinationlocation)"
+#       forcePathStyleAddressing: true
+
+#   - task: Bash@3
+#     displayName: Copy Bash Profile
+#     inputs:
+#       targetType: 'inline'
+#       script: |
+#         cd $(System.DefaultWorkingDirectory)/LandingZoneAWS/oracle-scripts/
+#         # cp $(System.DefaultWorkingDirectory)/LandingZoneAWS/oracle-scripts/bash_profile /tmp/bash_profile
+#         cp -r $(System.DefaultWorkingDirectory)/LandingZoneAWS/oracle-scripts/* /tmp/
+
+#   - task: Bash@3
+#     enabled: true
+#     displayName: Install Oracle Software
+#     inputs:
+#       filePath: $(System.DefaultWorkingDirectory)/LandingZoneAWS/oracle-scripts/oracledeployment.sh
+#       arguments: ${{ parameters.dbUser }}
+
+# - job: oraclePostInstall
+#   displayName: Oracle Post Installation
+#   dependsOn: 
+#     - init
+#     - domainJoin
+#     - RestartServers
+#     - CreateSwap
+#     - restartnodes
+#     - InstallOracle
+#   variables:
+#     vm_name_location1: $[ dependencies.init.outputs['SetVmNames1.vm_name_location1'] ]
+#   pool:
+#     name: ${{ parameters.clusterName }}
+#   strategy:
+#     matrix: $[ dependencies.init.outputs['SetVmNames1.location1Json'] ]
+#   steps:
+#   - task: Bash@3
+#     displayName: Oracle Post Install
+#     inputs:
+#       targetType: 'inline'
+#       script: |
+#         sudo /u01/app/oraInventory/orainstRoot.sh
+#         sudo /u01/app/oracle/product/12.2.0.1/db_1/root.sh
+
+# - job: PatchOracleHome
+#   displayName: Executing Patching
+#   dependsOn: 
+#     - init
+#     - CreateS3bucket
+#     - domainJoin
+#     - RestartServers
+#     - CreateSwap
+#     - restartnodes
+#     - InstallOracle
+#     - oraclePostInstall
+#   variables:
+#     vms1: $[ dependencies.init.outputs['SetVmNames1.vms1'] ]
+#     dumpBucket: $[ dependencies.CreateS3bucket.outputs['createS3Bucket.bucketName'] ]
+#   pool:
+#     name: ${{ parameters.clusterName }}
+#   strategy:
+#     matrix: $[ dependencies.init.outputs['SetVmNames1.location1Json'] ]
+#   steps:
+#   - task: Bash@3
+#     enabled: true
+#     displayName: Patching Executing 
+#     inputs:
+#       filePath: $(System.DefaultWorkingDirectory)/LandingZoneAWS/oracle-scripts/oraclePatch.sh
+#       arguments: ${{ parameters.dbUser }}
+
+# - job: DisplayContent
+#   displayName: Display Pipeline Parameters and Outputs
+#   dependsOn: 
+#     - init
+#     - CreateS3bucket
+#     - domainJoin
+#     - RestartServers
+#     - CreateSwap
+#     - restartnodes
+#     - InstallOracle
+#     - oraclePostInstall
+#   variables:
+#     vms1: $[ dependencies.init.outputs['SetVmNames1.vms1'] ]
+#     dumpBucket: $[ dependencies.CreateS3bucket.outputs['createS3Bucket.bucketName'] ]
+#   steps:
+#   - powershell: |
+#       Write-Host "----Input Parameters for Resource Creation -----"
+
+#       Write-Host "
+#       App Name                            : ${{ parameters.appName }}
+#       Type of Environment                 : ${{ parameters.typeOfEnv }}
+#       FSS Owner                           : ${{ parameters.fssOwner }}
+#       Country Code                        : $(country-code)
+#       ADO Organization                    : $(System.CollectionUri)
+#       Agent Pool Name                     : ${{ parameters.clusterName }}
+#       Cloud Provider                      : AWS
+#       Virtual Machines                    : $(vms1)
+#       AWS Service Connection Name         : $(AWS-SERVICE-CONNECTION-NAME)
+#       Terraform Service Connection Name   : $(TERRAFORM-AWS-SERVICE-CONNECTION-NAME)
+#       Terraform Backend S3 Bucket Name    : ${{ parameters.bucketName }}
+#       Location                            : ${{ parameters.region1 }}
+#       VPC ID                              : ${{ parameters.vpcId1 }}
+#       Subnet Ids Location                 : ${{ parameters.subnetIds1 }}
+#       Instance type                       : ${{ parameters.instance_type }}
+#       Operating System                    : ${{ parameters.osType }} 
+#       Volume1                             : ${{ parameters.Edrive }}GB
+#       Volume2                             : ${{ parameters.Fdrive }}GB
+#       Volume3                             : ${{ parameters.Gdrive }}GB
+#       Service User                        : $(SA-ADMIN-USER)
+#       Service Password                    : $(SA-ADMIN-PASS)    
+#       S3 Bucket for Oracle Dump Files     : $(dumpBucket)"
+
+#     displayName: Display Pipeline Information
